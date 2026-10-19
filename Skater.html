@@ -1,0 +1,924 @@
+<!DOCTYPE html>
+<!-- VAPORWAVE SKATER — Endless runner pivot from racing -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vaporwave Skater</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #06030f; overflow: hidden; }
+  #gl  { display: block; width: 100vw; height: 100vh; }
+  #hud { position: fixed; top: 14px; left: 14px; pointer-events: none; z-index: 50; }
+  #ui {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    z-index: 100; display: flex; align-items: center; justify-content: center;
+    font-family: 'Courier New', monospace; color: #fff;
+    pointer-events: none;
+    background: radial-gradient(circle at 50% 40%, rgba(20,5,40,0.55), rgba(4,2,12,0.92));
+  }
+  #ui:not(.active) { display: none; }
+  #ui.active { pointer-events: auto; }
+  .screen { display: none; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 2rem; width: 100%; height: 100%; }
+  .screen.active { display: flex; }
+  .title {
+    font-size: clamp(2.5rem, 7vw, 5rem); font-weight: 900; letter-spacing: 0.1em; margin: 0 0 1rem 0;
+    background: linear-gradient(90deg, #ff00aa, #00f0ff, #ffaa00);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    text-shadow: 0 0 30px rgba(255, 0, 170, 0.5);
+  }
+  .subtitle { font-size: 1.2rem; color: #00f0ff; letter-spacing: 0.3em; text-shadow: 0 0 10px rgba(0, 240, 255, 0.6); margin: 0.5rem 0 1.5rem 0; }
+  .big-btn {
+    font-size: 1.5rem; font-weight: 900; letter-spacing: 0.2em; padding: 1rem 3rem; margin: 0.5rem;
+    background: linear-gradient(135deg, #ff00aa, #00f0ff); color: #000; border: none; border-radius: 4px;
+    cursor: pointer; font-family: inherit; text-transform: uppercase;
+    box-shadow: 0 0 20px rgba(255, 0, 170, 0.5);
+  }
+  .big-btn:hover { filter: brightness(1.15); }
+  .footer { position: absolute; bottom: 1rem; font-size: 0.8rem; color: #888; }
+  .footer-2 { bottom: 2.5rem; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<canvas id="hud" width="260" height="86"></canvas>
+
+<div id="ui" class="active">
+  <div id="screen-menu" class="screen active">
+    <h1 class="title">VAPORWAVE SKATER</h1>
+    <p class="subtitle">ENDLESS RUNNER</p>
+    <button id="btn-play" class="big-btn">▶ PLAY</button>
+    <p class="footer footer-2">A/D or ←→ to switch lanes · W or ↑ to jump · S or ↓ to slide</p>
+    <p class="footer">Skate over glowing rails for bonus points!</p>
+  </div>
+
+  <div id="screen-playing" class="screen"></div>
+
+  <div id="screen-gameover" class="screen">
+    <h1 class="title">GAME OVER</h1>
+    <p id="final-score" class="subtitle"></p>
+    <button id="btn-restart" class="big-btn">↻ PLAY AGAIN</button>
+    <p class="footer">Press R to restart</p>
+  </div>
+</div>
+
+<script>
+/* ------------------------------------------------------------------ */
+/* Shaders                                                             */
+/* ------------------------------------------------------------------ */
+const VERT = `#version 300 es
+void main() {
+  vec2 v[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+  gl_Position = vec4(v[gl_VertexID], 0.0, 1.0);
+}`;
+
+const FRAG = `#version 300 es
+precision highp float;
+
+uniform vec3  iResolution;
+uniform float iTime;
+uniform float uSeed;
+uniform float uSpeed;
+uniform float uDistance;
+uniform vec2  uShake;
+uniform vec3  uSkater;        // x = lane (-1..1), y = jumpHeight, z = sliding (0/1)
+uniform float uGrind;         // 1 while a rail grind is active
+uniform int   uObstacleCount;
+uniform vec4  uObstacles[16]; // x = lane, y = dist, z = type (0=low, 1=high), w = alive
+uniform int   uRailCount;
+uniform vec4  uRails[8];      // x = lane, y = dist, z = alive, w = grinded
+
+out vec4 fragColor;
+
+const float PI           = 3.14159265359;
+const float SKATER_S     = 0.055;
+const vec2  KART_POS     = vec2(0.0, -0.25);
+const float HORIZON_Y    = 0.20;
+const float COMPRESSION  = 0.25;
+const float HORIZON_VIS  = 0.164;
+const float LANE_X       = 0.30;
+
+const vec3 PAL[30] = vec3[30](
+  vec3(0.02, 0.01, 0.10), vec3(0.35, 0.05, 0.40), vec3(0.10, 0.95, 1.00), vec3(0.08, 0.10, 0.25), vec3(1.00, 0.82, 0.30),
+  vec3(0.55, 0.95, 0.92), vec3(0.85, 1.00, 0.95), vec3(0.06, 0.30, 0.25), vec3(0.35, 0.65, 0.55), vec3(1.00, 0.35, 0.55),
+  vec3(0.15, 0.02, 0.02), vec3(0.85, 0.20, 0.05), vec3(0.70, 0.12, 0.10), vec3(0.35, 0.15, 0.10), vec3(1.00, 0.90, 0.20),
+  vec3(0.05, 0.20, 0.45), vec3(0.75, 0.92, 1.00), vec3(0.90, 0.98, 1.00), vec3(0.45, 0.65, 0.85), vec3(1.00, 0.45, 0.05),
+  vec3(0.20, 0.05, 0.35), vec3(1.00, 0.45, 0.20), vec3(0.35, 0.10, 0.45), vec3(0.20, 0.08, 0.25), vec3(0.30, 1.00, 0.95),
+  vec3(0.02, 0.10, 0.02), vec3(0.15, 0.55, 0.10), vec3(0.08, 0.30, 0.10), vec3(0.05, 0.18, 0.05), vec3(0.85, 1.00, 0.10)
+);
+
+float hash11(float n) {
+  n = fract(n * 0.1031);
+  n *= n + 33.33;
+  n *= n + n;
+  return fract(n);
+}
+
+float distToSegment(vec2 p, vec2 a, vec2 b) {
+  vec2 pa = p - a, ba = b - a;
+  float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+  return length(pa - ba * h);
+}
+
+float sdTriangle(vec2 p, vec2 p0, vec2 p1, vec2 p2) {
+  vec2 e0 = p1 - p0, e1 = p2 - p1, e2 = p0 - p2;
+  vec2 v0 = p - p0, v1 = p - p1, v2 = p - p2;
+  vec2 q0 = v0 - e0 * clamp(dot(v0, e0) / dot(e0, e0), 0.0, 1.0);
+  vec2 q1 = v1 - e1 * clamp(dot(v1, e1) / dot(e1, e1), 0.0, 1.0);
+  vec2 q2 = v2 - e2 * clamp(dot(v2, e2) / dot(e2, e2), 0.0, 1.0);
+  float s = sign(e0.x * e2.y - e0.y * e2.x);
+  vec2  d = min(min(vec2(dot(q0, q0), s * (v0.x * e0.y - v0.y * e0.x)),
+                    vec2(dot(q1, q1), s * (v1.x * e1.y - v1.y * e1.x))),
+                    vec2(dot(q2, q2), s * (v2.x * e2.y - v2.y * e2.x)));
+  return -sqrt(d.x) * sign(d.y);
+}
+
+float sdBox(vec2 p, vec2 b) {
+  vec2 d = abs(p) - b;
+  return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
+}
+
+vec2 rot2(vec2 v, float a) {
+  float c = cos(a), s = sin(a);
+  return vec2(c * v.x - s * v.y, s * v.x + c * v.y);
+}
+
+vec3 applyShadow(vec3 col, vec2 p, vec2 groundPoint, float radius) {
+  vec2  shSize = vec2(radius * 2.0, radius * 0.9);
+  float dSh    = length((p - groundPoint) / shSize);
+  float shA    = 0.55 * (1.0 - smoothstep(0.0, 1.2, dSh));
+  return mix(col, vec3(0.0), shA);
+}
+
+vec3 voidColor(vec2 wp, float time, int tid, vec3 offC, vec3 trackC, vec3 accent) {
+  if (tid == 0) {
+    vec2  grid     = abs(fract(wp * 8.0) - 0.5);
+    float line     = min(grid.x, grid.y);
+    float gridMask = 1.0 - smoothstep(0.0, 0.05, line);
+    return mix(offC, trackC, gridMask);
+  } else if (tid == 1) {
+    float d     = length(wp);
+    float n     = sin(d * 8.0 + time * 0.7) * cos(d * 6.0 - time * 0.4);
+    float cloud = smoothstep(0.0, 0.75, n);
+    return mix(offC * 0.75, offC + (vec3(1.0) - offC) * 0.45, cloud);
+  } else if (tid == 2) {
+    vec2  cell = floor(wp * 10.0);
+    float h    = hash11(cell.x * 17.3 + cell.y * 31.7);
+    float vein = step(0.72, h);
+    float fl   = 0.7 + 0.3 * sin(time * 3.0 + h * 20.0);
+    return mix(offC, accent * fl, vein);
+  } else if (tid == 3) {
+    vec2  cell  = floor(wp * 30.0);
+    float h     = hash11(cell.x * 7.3 + cell.y * 13.1);
+    float spark = step(0.97, h);
+    vec3  base  = offC * 0.9 + 0.05 * sin(wp.x * 6.0 + wp.y * 5.0);
+    return mix(base, vec3(1.0), spark);
+  } else if (tid == 4) {
+    float d1   = sin(wp.x * 4.0 + time * 0.3) * 0.5 + 0.5;
+    float d2   = sin(wp.y * 3.0 - time * 0.5 + wp.x * 2.0) * 0.5 + 0.5;
+    float dust = mix(d1, d2, 0.5);
+    return mix(offC, accent, dust * 0.65);
+  } else {
+    vec2  cell   = floor(wp * 6.0 + vec2(0.0, -time * 0.6));
+    float h      = hash11(cell.x * 11.1 + cell.y * 23.7);
+    float bubble = step(0.94, h);
+    return mix(offC, accent, bubble);
+  }
+}
+
+vec3 addScenery(vec3 col, vec2 p, float time, int tid, float seed, vec3 accent, float camYaw) {
+  if (p.y < HORIZON_VIS - 0.02) return col;
+  for (int i = 0; i < 24; i++) {
+    float fi   = float(i);
+    float li   = floor(fi / 8.0);
+    float hs1  = hash11(seed * 3.1 + fi * 7.7);
+    float hs2  = hash11(seed * 5.3 + fi * 11.1);
+    float hs3  = hash11(seed * 9.1 + fi * 13.3);
+    float scroll = camYaw * (0.12 + li * 0.22) + time * (0.004 + li * 0.006);
+    float spread = 2.2 + li * 0.9;
+    float xBase  = fract(hs1 + scroll) * spread - spread * 0.5;
+    /* every shape stands ON the horizon (they used to float up to 0.13 above it) */
+    float yBase  = HORIZON_VIS - 0.004 + hs2 * 0.006;
+    float size   = (0.055 + li * 0.025) * (0.7 + hs3 * 0.7) * 0.75;
+    vec2 local = vec2(p.x - xBase, p.y - yBase);
+    float d;
+    vec3  shapeCol;
+    if (tid == 0) {
+      d = sdBox(local - vec2(0.0, size * (0.6 + li * 0.3)),
+                vec2(size * (0.25 + li * 0.15), size * (0.6 + li * 0.4)));
+      shapeCol = vec3(0.05, 0.04, 0.14) + vec3(0.03, 0.01, 0.04) * li;
+    } else if (tid == 1) {
+      float dTrunk = sdBox(local - vec2(0.0, size * (0.35 + li * 0.2)),
+                           vec2(size * 0.05, size * (0.5 + li * 0.25)));
+      float dFrond = sdTriangle(local - vec2(0.0, size * (0.85 + li * 0.4)),
+                                vec2(0.0, size * 0.30),
+                                vec2(-size * (0.6 + li * 0.2), -size * 0.05),
+                                vec2( size * (0.6 + li * 0.2), -size * 0.05));
+      d = min(dTrunk, dFrond);
+      shapeCol = vec3(0.03, 0.10 + li * 0.02, 0.06);
+    } else if (tid == 2) {
+      d = sdTriangle(local - vec2(0.0, size * (0.4 + li * 0.2)),
+                     vec2(0.0, size * (0.5 + li * 0.3)),
+                     vec2(-size * (0.5 + li * 0.2), -size * (0.4 + li * 0.1)),
+                     vec2( size * (0.5 + li * 0.2), -size * (0.4 + li * 0.1)));
+      shapeCol = vec3(0.11, 0.03, 0.03) + vec3(0.02, 0.01, 0.01) * li;
+    } else if (tid == 3) {
+      d = abs(local.x) * (1.3 - li * 0.15)
+        + abs(local.y - size * (0.8 + li * 0.3)) - size * (0.9 + li * 0.3);
+      shapeCol = vec3(0.72, 0.85, 0.95) + vec3(0.05) * li;
+    } else if (tid == 4) {
+      d = sdTriangle(local - vec2(0.0, size * (0.35 + li * 0.15)),
+                     vec2(0.0, size * (0.4 + li * 0.2)),
+                     vec2(-size * (0.9 + li * 0.3), 0.0),
+                     vec2( size * (0.9 + li * 0.3), 0.0));
+      shapeCol = vec3(0.18 + li * 0.02, 0.05, 0.11 + li * 0.02);
+    } else {
+      d = sdTriangle(local - vec2(0.0, size * (0.4 + li * 0.2)),
+                     vec2(0.0, size * (0.45 + li * 0.25)),
+                     vec2(-size * (0.6 + li * 0.15), -size * (0.25 + li * 0.1)),
+                     vec2( size * (0.6 + li * 0.15), -size * (0.25 + li * 0.1)));
+      shapeCol = vec3(0.04, 0.11 + li * 0.02, 0.04);
+    }
+    float layerAlpha = 0.65 + li * 0.12;
+    float haze       = 1.0 - smoothstep(0.0, 0.18, abs(p.y - HORIZON_VIS) - li * 0.06);
+    float body    = 1.0 - smoothstep(-0.002, 0.002, d);
+    float outline = exp(-abs(d) * 200.0);
+    col = mix(col, mix(shapeCol, shapeCol * 0.4, haze), body * layerAlpha);
+    col += accent * outline * (0.25 + li * 0.10);
+  }
+  if (tid == 5) {
+    float flash = step(0.98, fract(time * 0.42));
+    col += vec3(0.40, 0.90, 0.15) * flash * 0.20;
+  }
+  return col;
+}
+
+vec3 skyDressing(vec3 col, vec2 p, float time, float speedN, vec3 accent) {
+  if (p.y > HORIZON_VIS + 0.06) {
+    vec2 sc = floor(p * 220.0);
+    float sh = hash11(sc.x * 12.9898 + sc.y * 78.233);
+    float star = step(0.9965, sh);
+    float twinkle = 0.55 + 0.45 * sin(time * 3.5 + sh * 137.0);
+    float starFade = smoothstep(HORIZON_VIS + 0.06, HORIZON_VIS + 0.28, p.y);
+    col += vec3(0.90, 0.95, 1.00) * star * twinkle * starFade * 0.9;
+  }
+  vec2  sunPos = vec2(0.0, HORIZON_VIS + 0.24);
+  float sunR   = 0.075;
+  float dSun   = length(p - sunPos) - sunR;
+  col = mix(col, mix(accent, vec3(1.0), 0.35), 1.0 - smoothstep(-0.003, 0.003, dSun));
+  col += accent * exp(-max(dSun, 0.0) * 22.0) * 0.45;
+  float ringD = abs(length(p - sunPos) - sunR * 1.65);
+  col += accent * exp(-ringD * 200.0) * 0.45;
+  float hGlow = exp(-abs(p.y - HORIZON_VIS) * 42.0);
+  col += accent * hGlow * 0.30;
+  if (speedN > 0.35) {
+    vec2  vp  = vec2(0.0, HORIZON_VIS + 0.02);
+    vec2  rel = p - vp;
+    float r   = length(rel);
+    float ang = atan(rel.y, rel.x);
+    float bands = sin(ang * 34.0 + time * 0.4);
+    float line  = pow(max(bands, 0.0), 10.0);
+    float rFade = smoothstep(0.15, 0.65, r) * (1.0 - smoothstep(0.85, 1.3, r));
+    float aLine = line * rFade * (speedN - 0.35) / 0.65;
+    col += mix(vec3(1.0), accent, 0.4) * aLine * 0.55;
+  }
+  return col;
+}
+
+/* ------------------------------------------------------------------ */
+/* SKATER — Skater Boy character from the reference                    */
+/* ------------------------------------------------------------------ */
+vec3 drawSkater(vec3 col, vec2 skp, float s, float aa) {
+  vec3 capCol   = vec3(0.90, 0.12, 0.15);
+  vec3 skinCol  = vec3(1.00, 0.83, 0.68);
+  vec3 shirtCol = vec3(0.20, 0.80, 0.30);
+  vec3 shirtDk  = vec3(0.13, 0.55, 0.20);
+  vec3 pantsCol = vec3(0.10, 0.10, 0.15);
+  vec3 shoeCol  = vec3(0.95, 0.95, 0.95);
+  vec3 laceCol  = vec3(1.00, 0.45, 0.10);
+  vec3 boardCol = vec3(0.55, 0.32, 0.15);
+  vec3 wheelCol = vec3(0.90, 0.90, 0.95);
+
+  /* Slide: squash vertically */
+  float sq = uSkater.z > 0.5 ? 0.62 : 1.0;
+  skp.y /= sq;
+
+  /* Jump lift */
+  skp.y -= uSkater.y * 0.40;
+
+  /* Lean into the lane (subtle body offset) */
+  float lean = -uSkater.x * s * 0.35;
+
+  /* === Skateboard === */
+  float ba = -uSkater.x * 0.18;
+  vec2 boardLocal = rot2(skp - vec2(0.0, -s * 0.60), ba);
+  float dBoard = sdBox(boardLocal, vec2(s * 1.60, s * 0.075));
+  col = mix(col, boardCol, 1.0 - smoothstep(-aa, aa, dBoard));
+  /* Deck outline */
+  float dBoardEdge = abs(dBoard + s * 0.018) - s * 0.014;
+  col = mix(col, boardCol * 0.4, 1.0 - smoothstep(-aa, aa, dBoardEdge));
+  /* Trucks + wheels */
+  vec2 wL = skp - vec2(-s * 1.05, -s * 0.72);
+  vec2 wR = skp - vec2( s * 1.05, -s * 0.72);
+  float wR2 = s * 0.14;
+  col = mix(col, wheelCol, 1.0 - smoothstep(-aa, aa, length(wL) - wR2));
+  col = mix(col, wheelCol, 1.0 - smoothstep(-aa, aa, length(wR) - wR2));
+  col = mix(col, vec3(0.15), 1.0 - smoothstep(-aa, aa, length(wL) - wR2 * 0.4));
+  col = mix(col, vec3(0.15), 1.0 - smoothstep(-aa, aa, length(wR) - wR2 * 0.4));
+
+  /* === Legs (black pants) === */
+  float dLegs = sdBox(skp - vec2(lean * 0.5, -s * 0.18), vec2(s * 0.22, s * 0.28));
+  col = mix(col, pantsCol, 1.0 - smoothstep(-aa, aa, dLegs));
+
+  /* === Torso (green shirt) === */
+  float dTorso = sdBox(skp - vec2(lean, s * 0.22), vec2(s * 0.30, s * 0.24));
+  col = mix(col, shirtCol, 1.0 - smoothstep(-aa, aa, dTorso));
+  /* Shirt stripes */
+  for (int k = 0; k < 3; k++) {
+    float stripeY = s * 0.10 + float(k) * s * 0.12;
+    float dStripe = sdBox(skp - vec2(lean, stripeY), vec2(s * 0.31, s * 0.018));
+    col = mix(col, shirtDk, 0.85 * (1.0 - smoothstep(-aa, aa, dStripe)));
+  }
+
+  /* === Head === */
+  vec2 headPos = vec2(lean, s * 0.62);
+  float dHead = length(skp - headPos) - s * 0.19;
+  col = mix(col, skinCol, 1.0 - smoothstep(-aa, aa, dHead));
+
+  /* === Red cap (backwards) === */
+  vec2 capPos = vec2(lean, s * 0.74);
+  float dCap = length(skp - capPos) - s * 0.20;
+  col = mix(col, capCol, 1.0 - smoothstep(-aa, aa, dCap));
+  /* Brim (points back) */
+  float dBrim = sdBox(skp - vec2(lean, s * 0.60), vec2(s * 0.28, s * 0.035));
+  col = mix(col, capCol * 0.75, 1.0 - smoothstep(-aa, aa, dBrim));
+  /* Puff / tassel */
+  float dPuff = length(skp - vec2(lean + s * 0.16, s * 0.94)) - s * 0.06;
+  col = mix(col, capCol, 1.0 - smoothstep(-aa, aa, dPuff));
+  col += capCol * exp(-max(dPuff, 0.0) * 100.0) * 0.4;
+
+  /* === Face === */
+  /* Angry eyebrows */
+  float dBrwL = sdBox(rot2(skp - vec2(lean - s * 0.07, s * 0.72), 0.35), vec2(s * 0.06, s * 0.012));
+  float dBrwR = sdBox(rot2(skp - vec2(lean + s * 0.07, s * 0.72), -0.35), vec2(s * 0.06, s * 0.012));
+  col = mix(col, vec3(0.05), 0.95 * (1.0 - smoothstep(-aa, aa, min(dBrwL, dBrwR))));
+  /* Eyes */
+  float dEyeL = length(skp - vec2(lean - s * 0.07, s * 0.66)) - s * 0.022;
+  float dEyeR = length(skp - vec2(lean + s * 0.07, s * 0.66)) - s * 0.022;
+  col = mix(col, vec3(0.05), 1.0 - smoothstep(-aa, aa, min(dEyeL, dEyeR)));
+  /* Big white grin */
+  float dGrin = sdBox(skp - vec2(lean, s * 0.52), vec2(s * 0.13, s * 0.035));
+  col = mix(col, vec3(1.0), 1.0 - smoothstep(-aa, aa, dGrin));
+  /* Teeth lines */
+  for (int t = 0; t < 3; t++) {
+    float tx = lean - s * 0.06 + float(t) * s * 0.06;
+    float dTooth = sdBox(skp - vec2(tx, s * 0.52), vec2(s * 0.008, s * 0.034));
+    col = mix(col, vec3(0.15), 1.0 - smoothstep(-aa, aa, dTooth));
+  }
+
+  /* === Arms (one up, one out) === */
+  vec2 armL = skp - vec2(lean - s * 0.38, s * 0.42);
+  vec2 armR = skp - vec2(lean + s * 0.42, s * 0.05);
+  float dArmL = sdBox(armL, vec2(s * 0.16, s * 0.06));
+  float dArmR = sdBox(armR, vec2(s * 0.16, s * 0.06));
+  col = mix(col, skinCol, 1.0 - smoothstep(-aa, aa, dArmL));
+  col = mix(col, skinCol, 1.0 - smoothstep(-aa, aa, dArmR));
+  /* Sleeve caps */
+  col = mix(col, shirtCol, 1.0 - smoothstep(-aa, aa,
+    length(skp - vec2(lean - s * 0.24, s * 0.35)) - s * 0.09));
+  col = mix(col, shirtCol, 1.0 - smoothstep(-aa, aa,
+    length(skp - vec2(lean + s * 0.30, s * 0.18)) - s * 0.09));
+
+  /* === Sneakers === */
+  float dShoeL = sdBox(skp - vec2(lean - s * 0.22, -s * 0.44), vec2(s * 0.17, s * 0.075));
+  float dShoeR = sdBox(skp - vec2(lean + s * 0.22, -s * 0.44), vec2(s * 0.17, s * 0.075));
+  col = mix(col, shoeCol, 1.0 - smoothstep(-aa, aa, dShoeL));
+  col = mix(col, shoeCol, 1.0 - smoothstep(-aa, aa, dShoeR));
+  /* Bright orange laces */
+  col += laceCol * (1.0 - smoothstep(0.0, s * 0.045,
+    length(skp - vec2(lean - s * 0.22, -s * 0.44)))) * 0.95;
+  col += laceCol * (1.0 - smoothstep(0.0, s * 0.045,
+    length(skp - vec2(lean + s * 0.22, -s * 0.44)))) * 0.95;
+  /* Shoe outline */
+  float dShoeOutline = abs(min(dShoeL, dShoeR) + s * 0.010) - s * 0.008;
+  col = mix(col, vec3(0.35), 0.7 * (1.0 - smoothstep(-aa, aa, dShoeOutline)));
+
+  /* Grind glow: cyan aura when grinding */
+  if (uGrind > 0.5) {
+    float glowR = length(skp - vec2(0.0, -s * 0.6)) - s * 1.5;
+    col += vec3(0.2, 1.0, 0.8) * exp(-max(glowR, 0.0) * 25.0) * 0.6;
+  }
+
+  return col;
+}
+
+void main() {
+  vec2 fc = gl_FragCoord.xy;
+  vec2 uv = fc / iResolution.xy;
+  vec2 p  = (fc - 0.5 * iResolution.xy) / iResolution.y + uShake;
+  float aa = 1.5 / iResolution.y;
+
+  int  tid    = int(hash11(uSeed) * 6.0) % 6;
+  vec3 skyTop = PAL[tid * 5 + 0];
+  vec3 skyBot = PAL[tid * 5 + 1];
+  vec3 trackC = PAL[tid * 5 + 2];
+  vec3 offC   = PAL[tid * 5 + 3];
+  vec3 accent = PAL[tid * 5 + 4];
+
+  float skyH = clamp((p.y - HORIZON_VIS) / (0.5 - HORIZON_VIS), 0.0, 1.0);
+  vec3 col = mix(skyBot, skyTop, pow(skyH, 0.85));
+
+  float speedN = clamp(uSpeed, 0.0, 1.0);
+  col = skyDressing(col, p, iTime, speedN, accent);
+  col = addScenery(col, p, iTime, tid, uSeed, accent, 0.0);
+
+  /* -------- Ground: scrolling endless road -------- */
+  float t = (p.y - KART_POS.y) / (HORIZON_Y - KART_POS.y);
+  if (t < 0.94) {
+    float inv = 1.0 - t;
+    if (inv > 0.10) {
+      float denom = min(1.0 / inv, 14.0);
+      float fwd   = (denom - 1.0) / COMPRESSION;
+      float laneX = p.x / inv;
+      vec2 worldPos = vec2(laneX, fwd + uDistance);
+      float aaWorld = 1.5 * denom / iResolution.y;
+
+      vec3 ground = voidColor(worldPos * 0.35, iTime, tid, offC, trackC, accent);
+
+      /* Road tint — darker central band */
+      float roadMask = 1.0 - smoothstep(0.42, 0.48, abs(laneX));
+      ground = mix(ground, ground * 0.55, roadMask * 0.6);
+
+      /* Lane dividers (dashed) */
+      float lane1 = abs(laneX - 0.15);
+      float lane2 = abs(laneX + 0.15);
+      float laneW = 0.010 + aaWorld * 2.0;
+      float laneMask = max(1.0 - smoothstep(laneW * 0.5, laneW, lane1),
+                           1.0 - smoothstep(laneW * 0.5, laneW, lane2));
+      float dash = step(0.45, fract(worldPos.y * 1.2));
+      ground = mix(ground, accent * 0.85, laneMask * dash * 0.85);
+
+      /* Road edges */
+      float edge1 = abs(laneX - 0.45);
+      float edge2 = abs(laneX + 0.45);
+      float edgeMask = max(1.0 - smoothstep(laneW * 0.5, laneW, edge1),
+                           1.0 - smoothstep(laneW * 0.5, laneW, edge2));
+      ground = mix(ground, accent, edgeMask * 0.95);
+
+      /* Distance fog */
+      float fog = smoothstep(3.0, 10.0, denom);
+      ground = mix(ground, skyBot, fog);
+
+      col = ground;
+    }
+  }
+
+  /* -------- Obstacles -------- */
+  /* Arrays are nearest-first, so walk them backwards: near objects end up on top. */
+  for (int j = 0; j < 16; j++) {
+    int i = 15 - j;
+    if (i < uObstacleCount) {
+      vec4 ob = uObstacles[i];
+      if (ob.w < 0.5) continue;
+      float dist = ob.y;
+      if (dist < -0.4 || dist > 30.0) continue;
+
+      float persp = 1.0 / (1.0 + dist * COMPRESSION);
+      float obX = ob.x * LANE_X * persp;
+      vec3  prevCol = col;
+      /* same projection as the ground (HORIZON_Y), so the object sits ON its lane */
+      float obY = KART_POS.y + (1.0 - persp) * (HORIZON_Y - KART_POS.y);
+      float obSize = 0.06 * persp;
+      float aaOb = aa * max(persp, 0.15);
+
+      if (ob.z < 0.5) {
+        /* Low pylon: player must JUMP */
+        vec2 vis = vec2(obX, obY) - vec2(0.0, obSize * 0.55);
+        float d = sdBox(p - vis, vec2(obSize * 0.55, obSize * 0.9));
+        col = mix(col, vec3(1.0, 0.55, 0.10), 1.0 - smoothstep(-aaOb, aaOb, d));
+        col += vec3(1.0, 0.55, 0.10) * exp(-max(d, 0.0) * 30.0) * 0.55;
+      } else {
+        /* High drone: player must SLIDE */
+        vec2 vis = vec2(obX, obY) + vec2(0.0, obSize * 1.05);
+        float d = sdBox(p - vis, vec2(obSize * 0.75, obSize * 0.38));
+        col = mix(col, vec3(0.62, 0.10, 1.0), 1.0 - smoothstep(-aaOb, aaOb, d));
+        col += vec3(0.62, 0.10, 1.0) * exp(-max(d, 0.0) * 30.0) * 0.55;
+        /* Rotor dots */
+        float rotor = length(p - vis - vec2(-obSize * 0.85, 0.0)) - obSize * 0.15;
+        col = mix(col, vec3(1.0, 0.6, 1.0), 1.0 - smoothstep(-aaOb, aaOb, rotor));
+      }
+      /* fade in out of the fog instead of popping in at the far end */
+      col = mix(prevCol, col, 1.0 - smoothstep(18.0, 27.0, dist));
+    }
+  }
+
+  /* -------- Rails -------- */
+  for (int j = 0; j < 8; j++) {
+    int i = 7 - j;
+    if (i < uRailCount) {
+      vec4 r = uRails[i];
+      if (r.z < 0.5) continue;
+      float dist = r.y;
+      if (dist < -0.4 || dist > 30.0) continue;
+
+      float persp = 1.0 / (1.0 + dist * COMPRESSION);
+      float rX = r.x * LANE_X * persp;
+      vec3  prevCol = col;
+      float rY = KART_POS.y + (1.0 - persp) * (HORIZON_Y - KART_POS.y);
+      float rW = 0.20 * persp;
+      float rH = 0.014 * persp;
+      float aaR = aa * max(persp, 0.15);
+
+      vec2 rPos = vec2(rX, rY);
+      float d = sdBox(p - rPos, vec2(rW, rH));
+      vec3 railCol = r.w > 0.5 ? vec3(1.0, 1.0, 0.4) : vec3(0.2, 1.0, 0.8);
+      col += railCol * exp(-max(d, 0.0) * 40.0) * 1.6;
+      col = mix(col, railCol, 1.0 - smoothstep(-aaR, aaR, d));
+      col = mix(prevCol, col, 1.0 - smoothstep(18.0, 27.0, dist));
+    }
+  }
+
+  /* -------- Skater shadow + skater (drawn last, on top) -------- */
+  vec2 shadowPos = KART_POS + vec2(uSkater.x * LANE_X, 0.0);
+  float shadowScale = 1.0 - uSkater.y * 0.6;
+  col = applyShadow(col, p, shadowPos, SKATER_S * 1.1 * shadowScale);
+
+  vec2 skp = p - KART_POS - vec2(uSkater.x * LANE_X, 0.0);
+  col = drawSkater(col, skp, SKATER_S, aa);
+
+  /* Vignette + scanlines */
+  vec2 vuv = gl_FragCoord.xy / iResolution.xy;
+  float vig = 1.0 - smoothstep(0.55, 1.05, length(vuv - 0.5) * 1.55);
+  col *= mix(0.55, 1.0, vig);
+  float scan = 0.97 + 0.03 * sin(gl_FragCoord.y * 1.6);
+  col *= scan;
+
+  fragColor = vec4(col, 1.0);
+}`;
+
+/* ------------------------------------------------------------------ */
+/* WebGL setup                                                         */
+/* ------------------------------------------------------------------ */
+const canvas = document.getElementById('gl');
+const gl = canvas.getContext('webgl2', { antialias: false, alpha: false });
+if (!gl) throw new Error('WebGL2 required');
+
+function compile(type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+  return sh;
+}
+
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+const U = n => gl.getUniformLocation(prog, n);
+const uRes    = U('iResolution');
+const uTime   = U('iTime');
+const uSeedU  = U('uSeed');
+const uSpd    = U('uSpeed');
+const uDist   = U('uDistance');
+const uShk    = U('uShake');
+const uSktU   = U('uSkater');
+const uObsC   = U('uObstacleCount');
+const uObsU   = U('uObstacles');
+const uRailC  = U('uRailCount');
+const uRailU  = U('uRails');
+const uGrindU = U('uGrind');
+
+/* ------------------------------------------------------------------ */
+/* Helpers                                                             */
+/* ------------------------------------------------------------------ */
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const fract = x => x - Math.floor(x);
+
+const MAX_SPEED = 1.0;
+const GRAVITY   = 8.0;    // units/s^2 (the old per-frame values launched the skater ~1 screen high)
+const JUMP_VEL  = 2.2;    // units/s  ->  peak ~0.30, airtime ~0.55 s
+const LANE_X    = 0.30;
+
+function hash11(n) {
+  n = fract(n * 0.1031);
+  n = n * (n + 33.33);
+  n = n * (n + n);
+  return fract(n);
+}
+
+let seed = 1.0;
+window.setSeed = v => { seed = Number(v) || 0; };
+
+/* ------------------------------------------------------------------ */
+/* Game state                                                          */
+/* ------------------------------------------------------------------ */
+const STATE_MENU     = 'menu';
+const STATE_PLAYING  = 'playing';
+const STATE_GAMEOVER = 'gameover';
+let state = STATE_MENU;
+
+let currentLane = 0;       // -1, 0, 1 (lerped)
+let jumpY = 0;             // 0..~0.27
+let jumpVel = 0;
+let isSliding = false;
+let isGrinding = false;
+let grindTime = 0;
+let score = 0;
+let distance = 0;
+let speed = 0;
+let obstacles = [];
+let rails = [];
+let obsTimer = 0;
+let railTimer = 0;
+let gameoverTime = 0;
+const keys = new Set();
+
+let targetLane = 0;
+addEventListener('keydown', e => {
+  keys.add(e.code);
+  /* One press = one lane hop, and you stay in the lane you chose. */
+  if (!e.repeat && state === STATE_PLAYING) {
+    if (e.code === 'KeyA' || e.code === 'ArrowLeft')  targetLane = clamp(targetLane - 1, -1, 1);
+    if (e.code === 'KeyD' || e.code === 'ArrowRight') targetLane = clamp(targetLane + 1, -1, 1);
+  }
+  if ((e.code === 'KeyR' || e.code === 'Space' || e.code === 'Enter') && state !== STATE_PLAYING) {
+    if (state === STATE_GAMEOVER && gameoverTime < 0.5) return;   /* don't skip the crash by accident */
+    restartGame();
+  }
+});
+addEventListener('keyup', e => keys.delete(e.code));
+addEventListener('blur', () => keys.clear());   /* no stuck keys after alt-tab */
+
+function resize() {
+  const dpr = Math.min(devicePixelRatio || 1, 1.5);
+  const w = Math.round(canvas.clientWidth * dpr);
+  const h = Math.round(canvas.clientHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* HUD                                                                 */
+/* ------------------------------------------------------------------ */
+const hud  = document.getElementById('hud');
+const hctx = hud.getContext('2d');
+function drawHUD() {
+  hctx.clearRect(0, 0, hud.width, hud.height);
+  if (state === STATE_MENU) return;
+
+  hctx.fillStyle = 'rgba(6, 8, 20, 0.60)';
+  hctx.fillRect(0, 0, hud.width - 2, hud.height - 2);
+  hctx.strokeStyle = 'rgba(110, 220, 255, 0.70)';
+  hctx.lineWidth = 2;
+  hctx.strokeRect(1, 1, hud.width - 4, hud.height - 4);
+
+  hctx.font = 'bold 24px ui-monospace, monospace';
+  hctx.fillStyle = '#ffd166';
+  hctx.fillText('SCORE ' + String(Math.floor(score)).padStart(6, '0'), 12, 34);
+
+  hctx.font = 'bold 18px ui-monospace, monospace';
+  hctx.fillStyle = '#7ce0ff';
+  hctx.fillText('DIST ' + Math.floor(distance) + 'm', 12, 64);
+
+  if (isGrinding) {
+    hctx.font = 'bold 14px ui-monospace, monospace';
+    hctx.fillStyle = '#3cffcf';
+    hctx.fillText('GRIND! +100', 132, 34);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Spawning                                                            */
+/* ------------------------------------------------------------------ */
+function spawnObstacle() {
+  let lane = 0;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    lane = Math.floor(Math.random() * 3) - 1;
+    let conflict = false;
+    for (const ob of obstacles) {
+      if (ob.lane === lane && ob.dist > 18) { conflict = true; break; }
+    }
+    for (const r of rails) { if (r.lane === lane && r.dist > 21) conflict = true; }
+    if (!conflict) break;
+  }
+  const type = Math.random() < 0.5 ? 0 : 1;
+  obstacles.push({ lane, dist: 25, type });
+}
+
+function spawnRail() {
+  let lane = Math.floor(Math.random() * 3) - 1;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    if (!obstacles.some(ob => ob.lane === lane && ob.dist > 21)) break;
+    lane = Math.floor(Math.random() * 3) - 1;
+  }
+  rails.push({ lane, dist: 25, grind: false });
+}
+
+/* ------------------------------------------------------------------ */
+/* Game logic                                                          */
+/* ------------------------------------------------------------------ */
+function restartGame() {
+  seed = Math.floor(Math.random() * 1000) + 1;
+  currentLane = 0;
+  targetLane = 0;
+  jumpY = 0;
+  jumpVel = 0;
+  isSliding = false;
+  isGrinding = false;
+  grindTime = 0;
+  score = 0;
+  distance = 0;
+  speed = 0;
+  obstacles = [];
+  rails = [];
+  obsTimer = 0;
+  railTimer = 0;
+  gameoverTime = 0;
+  setState(STATE_PLAYING);
+}
+
+function triggerGameOver() {
+  state = STATE_GAMEOVER;
+  gameoverTime = 0;
+  document.getElementById('final-score').textContent =
+    'FINAL SCORE  ' + String(Math.floor(score)).padStart(6, '0');
+  setState(STATE_GAMEOVER);
+}
+
+function setState(newState) {
+  state = newState;
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  const target = document.getElementById('screen-' + newState);
+  if (target) target.classList.add('active');
+  document.getElementById('ui').classList.toggle('active', newState !== STATE_PLAYING);
+}
+
+function updateGame(dt) {
+  /* Glide to the chosen lane (frame-rate independent). */
+  currentLane += (targetLane - currentLane) * (1 - Math.exp(-dt * 14));
+
+  /* Jump: real physics in seconds, so it feels the same at any frame rate. */
+  if ((keys.has('KeyW') || keys.has('ArrowUp')) && jumpY === 0 && jumpVel === 0) {
+    jumpVel = JUMP_VEL;
+  }
+  if (jumpVel !== 0 || jumpY > 0) {
+    jumpVel -= GRAVITY * dt;
+    jumpY   += jumpVel * dt;
+    if (jumpY <= 0) { jumpY = 0; jumpVel = 0; }
+  }
+
+  /* Slide (ground only) */
+  isSliding = (keys.has('KeyS') || keys.has('ArrowDown')) && jumpY === 0;
+
+  /* Ease up to full speed, then keep getting faster the further you get (up to 2x at 600m). */
+  speed += (MAX_SPEED - speed) * Math.min(dt * 0.8, 1);
+  const ramp = Math.min(distance / 600, 1.0);
+  const pace = speed * (1.0 + ramp);
+
+  /* Distance + score */
+  const step = pace * dt * 8;
+  distance += step;
+  score += step * 10;
+
+  /* Spawn timers */
+  /* timers run faster as pace rises, so obstacle spacing stays the same in world units */
+  obsTimer += dt * (1.0 + ramp);
+  railTimer += dt * (1.0 + ramp);
+  if (obsTimer > 0.85) { obsTimer = 0; spawnObstacle(); }
+  if (railTimer > 3.0) { railTimer = 0; spawnRail(); }
+
+  /* Move obstacles + rails toward player */
+  for (let i = obstacles.length - 1; i >= 0; i--) {
+    obstacles[i].dist -= step;
+    if (obstacles[i].dist < -1.0) obstacles.splice(i, 1);
+  }
+  for (let i = rails.length - 1; i >= 0; i--) {
+    rails[i].dist -= step;
+    if (rails[i].dist < -1.0) rails.splice(i, 1);
+  }
+
+  /* Collision */
+  for (const ob of obstacles) {
+    if (Math.abs(ob.dist) < 0.5 && Math.abs(ob.lane - currentLane) < 0.4) {
+      let avoided = false;
+      if (ob.type === 0 && jumpY > 0.10) avoided = true;
+      if (ob.type === 1 && isSliding)    avoided = true;
+      if (!avoided) { triggerGameOver(); return; }
+    }
+  }
+
+  /* Rails */
+  for (const r of rails) {
+    if (!r.grind && jumpY < 0.10 && Math.abs(r.dist) < 0.5 && Math.abs(r.lane - currentLane) < 0.4) {
+      r.grind = true;
+      score += 100;
+      isGrinding = true;
+      grindTime = 0.6;
+    }
+  }
+  if (isGrinding) {
+    grindTime -= dt;
+    if (grindTime <= 0) isGrinding = false;
+  }
+
+  if (state === STATE_GAMEOVER) gameoverTime += dt;
+}
+
+/* ------------------------------------------------------------------ */
+/* Uniform buffers                                                     */
+/* ------------------------------------------------------------------ */
+const obsBuf  = new Float32Array(16 * 4);
+const railBuf = new Float32Array(8 * 4);
+
+function packBuffers() {
+  for (let i = 0; i < 16; i++) {
+    if (i < obstacles.length) {
+      const ob = obstacles[i];
+      obsBuf[i * 4 + 0] = ob.lane;
+      obsBuf[i * 4 + 1] = ob.dist;
+      obsBuf[i * 4 + 2] = ob.type;
+      obsBuf[i * 4 + 3] = 1.0;
+    } else {
+      obsBuf[i * 4 + 3] = 0.0;
+    }
+  }
+  for (let i = 0; i < 8; i++) {
+    if (i < rails.length) {
+      const r = rails[i];
+      railBuf[i * 4 + 0] = r.lane;
+      railBuf[i * 4 + 1] = r.dist;
+      railBuf[i * 4 + 2] = 1.0;
+      railBuf[i * 4 + 3] = r.grind ? 1.0 : 0.0;
+    } else {
+      railBuf[i * 4 + 2] = 0.0;
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Main loop                                                           */
+/* ------------------------------------------------------------------ */
+const t0 = performance.now();
+let last = t0;
+
+function frame(now) {
+  const dt   = Math.min((now - last) / 1000, 1 / 30);
+  last = now;
+  const tSec = (now - t0) / 1000;
+
+  resize();
+  gl.viewport(0, 0, canvas.width, canvas.height);
+
+  if (state === STATE_PLAYING) {
+    updateGame(dt);
+  } else if (state === STATE_GAMEOVER) {
+    gameoverTime += dt;
+  } else {
+    distance += dt * 2.0;     /* idle scroll behind the menu */
+  }
+
+  drawHUD();
+
+  /* Shake */
+  if (state === STATE_GAMEOVER && gameoverTime < 0.25) {
+    gl.uniform2f(uShk,
+      Math.sin(tSec * 90.0) * 0.015 * (1.0 - gameoverTime / 0.25),
+      Math.cos(tSec * 120.0) * 0.015 * (1.0 - gameoverTime / 0.25));
+  } else {
+    gl.uniform2f(uShk, 0.0, 0.0);
+  }
+
+  packBuffers();
+
+  gl.uniform3f(uRes, canvas.width, canvas.height, 1.0);
+  gl.uniform1f(uTime, tSec);
+  gl.uniform1f(uSeedU, seed);
+  gl.uniform1f(uSpd, speed);
+  gl.uniform1f(uDist, distance);
+  gl.uniform3f(uSktU, currentLane, jumpY, isSliding ? 1.0 : 0.0);
+  gl.uniform1f(uGrindU, isGrinding ? 1.0 : 0.0);
+  gl.uniform1i(uObsC, Math.min(obstacles.length, 16));
+  gl.uniform4fv(uObsU, obsBuf);
+  gl.uniform1i(uRailC, Math.min(rails.length, 8));
+  gl.uniform4fv(uRailU, railBuf);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ------------------------------------------------------------------ */
+/* Buttons                                                             */
+/* ------------------------------------------------------------------ */
+document.getElementById('btn-play').addEventListener('click', restartGame);
+document.getElementById('btn-restart').addEventListener('click', restartGame);
+
+setState(STATE_MENU);
+</script>
+</body>
+</html>
