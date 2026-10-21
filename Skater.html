@@ -36,11 +36,31 @@
   .big-btn:hover { filter: brightness(1.15); }
   .footer { position: absolute; bottom: 1rem; font-size: 0.8rem; color: #888; }
   .footer-2 { bottom: 2.5rem; }
+  #banner { position: fixed; left: 0; right: 0; top: 20%; z-index: 60; pointer-events: none; text-align: center;
+    font-family: 'Courier New', monospace; opacity: 0; }
+  #banner .b-lv  { font-size: clamp(2.2rem, 7vw, 4.5rem); font-weight: 900; letter-spacing: 0.25em; color: #fff;
+    text-shadow: 0 0 24px #ff00aa, 0 0 48px #00f0ff; }
+  #banner .b-msg { font-size: clamp(1rem, 2.4vw, 1.6rem); letter-spacing: 0.4em; color: #ff6677;
+    text-shadow: 0 0 12px #ff2a3a; margin-top: 0.4rem; }
+  #banner.show { animation: bannerPop 2.4s ease-out forwards; }
+  @keyframes bannerPop {
+    0%   { opacity: 0; transform: scale(1.3); }
+    12%  { opacity: 1; transform: scale(1.0); }
+    75%  { opacity: 1; }
+    100% { opacity: 0; }
+  }
+  #warn { position: fixed; left: 0; right: 0; bottom: 8%; z-index: 60; pointer-events: none; text-align: center;
+    font-family: 'Courier New', monospace; font-weight: 900; letter-spacing: 0.35em;
+    font-size: clamp(1rem, 2.6vw, 1.8rem); color: #ff3344; text-shadow: 0 0 14px #ff0022; opacity: 0; }
+  #warn.on { animation: warnBlink 0.6s ease-in-out infinite; }
+  @keyframes warnBlink { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
 </style>
 </head>
 <body>
 <canvas id="gl"></canvas>
-<canvas id="hud" width="260" height="86"></canvas>
+<canvas id="hud" width="260" height="142"></canvas>
+<div id="banner"><div class="b-lv"></div><div class="b-msg"></div></div>
+<div id="warn">IT'S RIGHT BEHIND YOU</div>
 
 <div id="ui" class="active">
   <div id="screen-menu" class="screen active">
@@ -48,13 +68,14 @@
     <p class="subtitle">ENDLESS RUNNER</p>
     <button id="btn-play" class="big-btn">▶ PLAY</button>
     <p class="footer footer-2">A/D or ←→ to switch lanes · W or ↑ to jump · S or ↓ to slide</p>
-    <p class="footer">Skate over glowing rails for bonus points!</p>
+    <p class="footer">Something is chasing you. Clean running and coins push it back · M = mute</p>
   </div>
 
   <div id="screen-playing" class="screen"></div>
 
   <div id="screen-gameover" class="screen">
-    <h1 class="title">GAME OVER</h1>
+    <h1 class="title">CAUGHT</h1>
+    <p id="final-dist" class="subtitle"></p>
     <p id="final-score" class="subtitle"></p>
     <button id="btn-restart" class="big-btn">↻ PLAY AGAIN</button>
     <p class="footer">Press R to restart</p>
@@ -81,11 +102,16 @@ uniform float uSpeed;
 uniform float uDistance;
 uniform vec2  uShake;
 uniform vec3  uSkater;        // x = lane (-1..1), y = jumpHeight, z = sliding (0/1)
-uniform float uGrind;         // 1 while a rail grind is active
+uniform float uPop;           // 1 right after a coin pickup, fades to 0
+uniform float uThreat;        // 0 = far behind you ... 1 = it has you
+uniform float uHurt;          // red flash after a stumble
+uniform float uBlink;         // 1 while the skater is invulnerable (blinks)
+uniform float uBeat;          // heartbeat pulse 0..1
+uniform float uDark;          // how deep into the run you are (0..1): the world drains and darkens
 uniform int   uObstacleCount;
 uniform vec4  uObstacles[16]; // x = lane, y = dist, z = type (0=low, 1=high), w = alive
-uniform int   uRailCount;
-uniform vec4  uRails[8];      // x = lane, y = dist, z = alive, w = grinded
+uniform int   uCoinCount;
+uniform vec4  uCoins[32];     // x = lane, y = dist, z = height (0 ground, 1 raised), w = spin phase
 
 out vec4 fragColor;
 
@@ -156,32 +182,26 @@ vec3 voidColor(vec2 wp, float time, int tid, vec3 offC, vec3 trackC, vec3 accent
     float gridMask = 1.0 - smoothstep(0.0, 0.05, line);
     return mix(offC, trackC, gridMask);
   } else if (tid == 1) {
-    float d     = length(wp);
-    float n     = sin(d * 8.0 + time * 0.7) * cos(d * 6.0 - time * 0.4);
-    float cloud = smoothstep(0.0, 0.75, n);
-    return mix(offC * 0.75, offC + (vec3(1.0) - offC) * 0.45, cloud);
+    /* Minty: a soft, low-contrast drift instead of hard white streaks */
+    float drift = 0.5 + 0.5 * sin(wp.y * 0.6 - time * 0.5 + sin(wp.x * 1.2) * 1.2);
+    return mix(offC * 0.92, offC + (vec3(1.0) - offC) * 0.10, drift);
   } else if (tid == 2) {
-    vec2  cell = floor(wp * 10.0);
-    float h    = hash11(cell.x * 17.3 + cell.y * 31.7);
-    float vein = step(0.72, h);
-    float fl   = 0.7 + 0.3 * sin(time * 3.0 + h * 20.0);
-    return mix(offC, accent * fl, vein);
+    /* Lava: smooth, slow heat shimmer instead of random squares */
+    float heat = 0.5 + 0.5 * sin(wp.y * 0.9 + time * 0.8 + sin(wp.x * 1.3) * 1.5);
+    return mix(offC, offC + accent * 0.16, heat);
   } else if (tid == 3) {
-    vec2  cell  = floor(wp * 30.0);
-    float h     = hash11(cell.x * 7.3 + cell.y * 13.1);
-    float spark = step(0.97, h);
-    vec3  base  = offC * 0.9 + 0.05 * sin(wp.x * 6.0 + wp.y * 5.0);
-    return mix(base, vec3(1.0), spark);
+    /* Ice: a gentle sheen instead of random sparkle cells */
+    float sheen = 0.5 + 0.5 * sin(wp.x * 1.1 + wp.y * 0.7 + time * 0.4);
+    return mix(offC * 0.88, offC * 1.04, sheen);
   } else if (tid == 4) {
     float d1   = sin(wp.x * 4.0 + time * 0.3) * 0.5 + 0.5;
     float d2   = sin(wp.y * 3.0 - time * 0.5 + wp.x * 2.0) * 0.5 + 0.5;
     float dust = mix(d1, d2, 0.5);
     return mix(offC, accent, dust * 0.65);
   } else {
-    vec2  cell   = floor(wp * 6.0 + vec2(0.0, -time * 0.6));
-    float h      = hash11(cell.x * 11.1 + cell.y * 23.7);
-    float bubble = step(0.94, h);
-    return mix(offC, accent, bubble);
+    /* Toxic: slow, soft glow drifting past instead of random bubble squares */
+    float glow = 0.5 + 0.5 * sin(wp.y * 0.8 - time * 0.9 + sin(wp.x * 1.6) * 1.2);
+    return mix(offC, offC + accent * 0.14, glow);
   }
 }
 
@@ -265,9 +285,6 @@ vec3 skyDressing(vec3 col, vec2 p, float time, float speedN, vec3 accent) {
   float sunR   = 0.075;
   float dSun   = length(p - sunPos) - sunR;
   col = mix(col, mix(accent, vec3(1.0), 0.35), 1.0 - smoothstep(-0.003, 0.003, dSun));
-  col += accent * exp(-max(dSun, 0.0) * 22.0) * 0.45;
-  float ringD = abs(length(p - sunPos) - sunR * 1.65);
-  col += accent * exp(-ringD * 200.0) * 0.45;
   float hGlow = exp(-abs(p.y - HORIZON_VIS) * 42.0);
   col += accent * hGlow * 0.30;
   if (speedN > 0.35) {
@@ -303,7 +320,7 @@ vec3 drawSkater(vec3 col, vec2 skp, float s, float aa) {
   skp.y /= sq;
 
   /* Jump lift */
-  skp.y -= uSkater.y * 0.40;
+  skp.y -= uSkater.y * 0.70;
 
   /* Lean into the lane (subtle body offset) */
   float lean = -uSkater.x * s * 0.35;
@@ -402,12 +419,6 @@ vec3 drawSkater(vec3 col, vec2 skp, float s, float aa) {
   float dShoeOutline = abs(min(dShoeL, dShoeR) + s * 0.010) - s * 0.008;
   col = mix(col, vec3(0.35), 0.7 * (1.0 - smoothstep(-aa, aa, dShoeOutline)));
 
-  /* Grind glow: cyan aura when grinding */
-  if (uGrind > 0.5) {
-    float glowR = length(skp - vec2(0.0, -s * 0.6)) - s * 1.5;
-    col += vec3(0.2, 1.0, 0.8) * exp(-max(glowR, 0.0) * 25.0) * 0.6;
-  }
-
   return col;
 }
 
@@ -473,9 +484,11 @@ void main() {
   }
 
   /* -------- Obstacles -------- */
-  /* Arrays are nearest-first, so walk them backwards: near objects end up on top. */
+  /* Each object is drawn in "object space": q = (p - groundPoint) / persp, so one unit of q is one
+     screen unit at the skater's depth. A lane is LANE_X (0.30) wide there and every obstacle uses
+     0.25 of it (HW = 0.125 each side), so it fills the lane it was given and nothing else. */
   for (int j = 0; j < 16; j++) {
-    int i = 15 - j;
+    int i = 15 - j;                       /* arrays are nearest-first: walk backwards, near ends up on top */
     if (i < uObstacleCount) {
       vec4 ob = uObstacles[i];
       if (ob.w < 0.5) continue;
@@ -483,57 +496,163 @@ void main() {
       if (dist < -0.4 || dist > 30.0) continue;
 
       float persp = 1.0 / (1.0 + dist * COMPRESSION);
-      float obX = ob.x * LANE_X * persp;
+      vec2  base  = vec2(ob.x * LANE_X * persp,
+                         KART_POS.y + (1.0 - persp) * (HORIZON_Y - KART_POS.y));
+      vec2  q     = (p - base) / persp;
+      if (abs(q.x) > 0.30 || q.y < -0.04 || q.y > 0.17) continue;   /* cheap reject */
+
+      float aq     = aa / max(persp, 0.12);
+      float HW     = 0.125;
+      float lampOn = step(0.0, sin(iTime * 7.0 + ob.x * 2.0 + dist * 0.3));
+      float onSide = q.x < 0.0 ? lampOn : 1.0 - lampOn;     /* lamps alternate left / right */
       vec3  prevCol = col;
-      /* same projection as the ground (HORIZON_Y), so the object sits ON its lane */
-      float obY = KART_POS.y + (1.0 - persp) * (HORIZON_Y - KART_POS.y);
-      float obSize = 0.06 * persp;
-      float aaOb = aa * max(persp, 0.15);
+
+      /* contact shadow on the road */
+      vec2 shq = q / vec2(HW * 1.15, 0.014);
+      col = mix(col, vec3(0.0), 0.45 * (1.0 - smoothstep(0.5, 1.0, length(shq))));
 
       if (ob.z < 0.5) {
-        /* Low pylon: player must JUMP */
-        vec2 vis = vec2(obX, obY) - vec2(0.0, obSize * 0.55);
-        float d = sdBox(p - vis, vec2(obSize * 0.55, obSize * 0.9));
-        col = mix(col, vec3(1.0, 0.55, 0.10), 1.0 - smoothstep(-aaOb, aaOb, d));
-        col += vec3(1.0, 0.55, 0.10) * exp(-max(d, 0.0) * 30.0) * 0.55;
+        /* ---- Road barrier (JUMP): striped board on two legs with amber lamps ---- */
+        float dLegs = min(sdBox(q - vec2(-0.088, 0.016), vec2(0.011, 0.016)),
+                          sdBox(q - vec2( 0.088, 0.016), vec2(0.011, 0.016)));
+        col = mix(col, vec3(0.16, 0.17, 0.22), 1.0 - smoothstep(-aq, aq, dLegs));
+        float dFoot = min(sdBox(q - vec2(-0.088, 0.003), vec2(0.028, 0.003)),
+                          sdBox(q - vec2( 0.088, 0.003), vec2(0.028, 0.003)));
+        col = mix(col, vec3(0.07, 0.07, 0.10), 1.0 - smoothstep(-aq, aq, dFoot));
+
+        float dBoard = sdBox(q - vec2(0.0, 0.047), vec2(HW, 0.021));
+        float stripe = step(0.5, fract((q.x + q.y) / 0.050));
+        vec3  bCol   = mix(vec3(1.00, 0.50, 0.08), vec3(0.96, 0.96, 0.98), stripe);
+        bCol *= 0.70 + 0.55 * smoothstep(0.026, 0.068, q.y);            /* lit from above */
+        col = mix(col, bCol, 1.0 - smoothstep(-aq, aq, dBoard));
+        float rimB = 1.0 - smoothstep(-aq, aq, abs(dBoard + 0.003) - 0.0025);
+        col = mix(col, vec3(0.22, 0.11, 0.03), 0.85 * rimB);
+
+        float dLamp = length(vec2(abs(q.x) - 0.108, q.y - 0.077)) - 0.0095;
+        col = mix(col, mix(vec3(0.30, 0.16, 0.03), vec3(1.0, 0.82, 0.25), onSide),
+                  1.0 - smoothstep(-aq, aq, dLamp));
+        col += vec3(1.0, 0.65, 0.10) * exp(-max(dLamp, 0.0) * 60.0) * 0.55 * onSide;
       } else {
-        /* High drone: player must SLIDE */
-        vec2 vis = vec2(obX, obY) + vec2(0.0, obSize * 1.05);
-        float d = sdBox(p - vis, vec2(obSize * 0.75, obSize * 0.38));
-        col = mix(col, vec3(0.62, 0.10, 1.0), 1.0 - smoothstep(-aaOb, aaOb, d));
-        col += vec3(0.62, 0.10, 1.0) * exp(-max(d, 0.0) * 30.0) * 0.55;
-        /* Rotor dots */
-        float rotor = length(p - vis - vec2(-obSize * 0.85, 0.0)) - obSize * 0.15;
-        col = mix(col, vec3(1.0, 0.6, 1.0), 1.0 - smoothstep(-aaOb, aaOb, rotor));
+        /* ---- Overhead gantry (SLIDE): two posts and a hazard beam at head height ---- */
+        float dPost = min(sdBox(q - vec2(-0.118, 0.045), vec2(0.0085, 0.045)),
+                          sdBox(q - vec2( 0.118, 0.045), vec2(0.0085, 0.045)));
+        col = mix(col, vec3(0.14, 0.15, 0.21), 1.0 - smoothstep(-aq, aq, dPost));
+        col = mix(col, vec3(0.34, 0.36, 0.48), 0.9 * (1.0 - smoothstep(-aq, aq, sdBox(q - vec2(-0.1205, 0.045), vec2(0.0022, 0.043)))));
+        col = mix(col, vec3(0.34, 0.36, 0.48), 0.9 * (1.0 - smoothstep(-aq, aq, sdBox(q - vec2( 0.1155, 0.045), vec2(0.0022, 0.043)))));
+
+        float dBeam  = sdBox(q - vec2(0.0, 0.056), vec2(HW, 0.0135));
+        float stripe = step(0.5, fract((q.x - q.y) / 0.050));
+        vec3  bCol   = mix(vec3(0.92, 0.10, 0.16), vec3(0.96), stripe);
+        bCol *= 0.70 + 0.55 * smoothstep(0.0425, 0.0695, q.y);
+        col = mix(col, bCol, 1.0 - smoothstep(-aq, aq, dBeam));
+        float rimG = 1.0 - smoothstep(-aq, aq, abs(dBeam + 0.003) - 0.0025);
+        col = mix(col, vec3(0.20, 0.03, 0.05), 0.85 * rimG);
+
+        /* neon emitter strip under the beam, spilling light onto the road */
+        float dEm = sdBox(q - vec2(0.0, 0.0405), vec2(0.108, 0.0022));
+        col += vec3(0.62, 0.15, 1.00) * (1.0 - smoothstep(-aq, aq, dEm)) * 0.9;
+        col += vec3(0.62, 0.15, 1.00) * exp(-max(dEm, 0.0) * 70.0) * 0.30;
+
+        float dBeacon = length(vec2(abs(q.x) - 0.118, q.y - 0.096)) - 0.0105;
+        col = mix(col, mix(vec3(0.30, 0.03, 0.05), vec3(1.0, 0.18, 0.22), onSide),
+                  1.0 - smoothstep(-aq, aq, dBeacon));
+        col += vec3(1.0, 0.15, 0.20) * exp(-max(dBeacon, 0.0) * 60.0) * 0.55 * onSide;
       }
-      /* fade in out of the fog instead of popping in at the far end */
-      col = mix(prevCol, col, 1.0 - smoothstep(18.0, 27.0, dist));
+
+      /* haze with distance + fade in from the fog instead of popping in */
+      float visO = (1.0 - 0.6 * smoothstep(3.0, 10.0, 1.0 / persp)) * (1.0 - smoothstep(18.0, 27.0, dist));
+      col = prevCol + (col - prevCol) * visO;
     }
   }
 
-  /* -------- Rails -------- */
-  for (int j = 0; j < 8; j++) {
-    int i = 7 - j;
-    if (i < uRailCount) {
-      vec4 r = uRails[i];
-      if (r.z < 0.5) continue;
-      float dist = r.y;
+  /* -------- Coins -------- */
+  for (int j = 0; j < 32; j++) {
+    int i = 31 - j;
+    if (i < uCoinCount) {
+      vec4  cn   = uCoins[i];
+      float dist = cn.y;
       if (dist < -0.4 || dist > 30.0) continue;
 
       float persp = 1.0 / (1.0 + dist * COMPRESSION);
-      float rX = r.x * LANE_X * persp;
-      vec3  prevCol = col;
-      float rY = KART_POS.y + (1.0 - persp) * (HORIZON_Y - KART_POS.y);
-      float rW = 0.20 * persp;
-      float rH = 0.014 * persp;
-      float aaR = aa * max(persp, 0.15);
+      vec2  base  = vec2(cn.x * LANE_X * persp,
+                         KART_POS.y + (1.0 - persp) * (HORIZON_Y - KART_POS.y));
+      float cH    = cn.z > 0.5 ? 0.135 : 0.060;          /* raised coins hang at jump height */
+      vec2  q     = (p - base) / persp;
+      if (abs(q.x) > 0.09 || q.y < -0.02 || q.y > cH + 0.07) continue;
 
-      vec2 rPos = vec2(rX, rY);
-      float d = sdBox(p - rPos, vec2(rW, rH));
-      vec3 railCol = r.w > 0.5 ? vec3(1.0, 1.0, 0.4) : vec3(0.2, 1.0, 0.8);
-      col += railCol * exp(-max(d, 0.0) * 40.0) * 1.6;
-      col = mix(col, railCol, 1.0 - smoothstep(-aaR, aaR, d));
-      col = mix(prevCol, col, 1.0 - smoothstep(18.0, 27.0, dist));
+      float aq      = aa / max(persp, 0.12);
+      vec3  prevCol = col;
+
+      vec2 shq = q / vec2(0.034, 0.010);
+      col = mix(col, vec3(0.0), (cn.z > 0.5 ? 0.20 : 0.38) * (1.0 - smoothstep(0.4, 1.0, length(shq))));
+
+      float R    = 0.030;
+      float spin = abs(cos(iTime * 4.5 + cn.w * 6.283));            /* edge-on <-> face-on */
+      vec2  e    = (q - vec2(0.0, cH)) / vec2(max(spin, 0.20) * R, R);
+      float rr   = length(e);
+      float aaE  = aq / R;
+      float body = 1.0 - smoothstep(1.0 - aaE, 1.0 + aaE, rr);
+
+      vec3  gold = mix(vec3(1.00, 0.86, 0.28), vec3(1.00, 0.60, 0.08), clamp(0.5 - 0.5 * e.y + 0.25 * e.x, 0.0, 1.0));
+      float face = smoothstep(0.35, 0.80, spin);
+      vec3  cc   = mix(gold, vec3(0.78, 0.46, 0.05), smoothstep(0.74, 0.88, rr));        /* darker rim */
+      cc = mix(cc, vec3(1.0, 0.95, 0.65), exp(-abs(rr - 0.60) * 28.0) * 0.55 * face);    /* engraved ring */
+      float mark = (1.0 - smoothstep(0.0, 0.11, abs(e.x))) * (1.0 - smoothstep(0.30, 0.38, abs(e.y)));
+      cc = mix(cc, vec3(0.85, 0.52, 0.06), mark * 0.8 * face);                           /* centre mark */
+      float gl  = (e.x + e.y * 0.7) - (fract(iTime * 0.9 + cn.w) * 3.0 - 1.5);
+      cc += vec3(1.0, 0.98, 0.80) * exp(-gl * gl * 10.0) * 0.5;                          /* glint sweep */
+
+      col = mix(col, cc, body);
+      col += vec3(1.0, 0.72, 0.18) * exp(-max(rr - 1.0, 0.0) * 2.2) * 0.22;
+
+      float visC = (1.0 - 0.6 * smoothstep(3.0, 10.0, 1.0 / persp)) * (1.0 - smoothstep(18.0, 27.0, dist));
+      col = prevCol + (col - prevCol) * visC;
+    }
+  }
+
+  /* -------- The Dark: whatever is chasing you, rising from the bottom of the screen -------- */
+  if (uThreat > 0.02) {
+    float th   = uThreat;
+    float cxD  = uSkater.x * LANE_X * 0.45;                       /* it leans toward your lane */
+    float topY = -0.58 + th * 0.42;                               /* off-screen ... over the skater */
+    if (p.y < topY + 0.22) {
+      float wob = 0.020 * sin(p.x * 17.0 + iTime * 2.3)
+                + 0.012 * sin(p.x * 41.0 - iTime * 3.7)
+                + 0.008 * sin(p.x * 83.0 + iTime * 6.1);
+      float dMass = p.y - (topY + wob);
+      float dClaw = 1e3;
+      for (int k = -3; k <= 3; k++) {
+        float fk  = float(k);
+        float chH = 0.050 + 0.060 * abs(sin(fk * 2.1 + iTime * 1.3)) * (0.4 + th);
+        vec2  cl  = p - vec2(cxD + fk * 0.12 + 0.012 * sin(iTime * 2.0 + fk), topY + wob * 0.6);
+        dClaw = min(dClaw, sdTriangle(cl, vec2(0.0, chH), vec2(-0.032, -0.01), vec2(0.032, -0.01)));
+      }
+      float dD   = min(dMass, dClaw);
+      float body = 1.0 - smoothstep(-0.004, 0.004, dD);
+      col *= 1.0 - 0.55 * th * exp(-max(dD, 0.0) * 9.0);          /* smoke thrown ahead of it */
+      col  = mix(col, vec3(0.015, 0.0, 0.03), body);
+      col += vec3(0.85, 0.05, 0.14) * exp(-abs(dD) * 70.0) * (0.25 + 0.55 * th);   /* red rim light */
+
+      /* eyes: two slanted slits that open up as it gets closer, with the odd blink */
+      float eyeA = smoothstep(0.10, 0.30, th) * (1.0 - step(0.975, fract(iTime * 0.37)));
+      float eyeY = topY - 0.06 - 0.03 * th;
+      float eyeW = 0.030 + 0.022 * th;
+      float eyeH = 0.009 + 0.008 * th;
+      for (int s2 = 0; s2 < 2; s2++) {
+        float sg = s2 == 0 ? -1.0 : 1.0;
+        vec2  ep = rot2(p - vec2(cxD + sg * (0.075 + 0.022 * th), eyeY), sg * 0.40);
+        float le = length(ep / vec2(eyeW, eyeH));
+        col += vec3(1.0, 0.12, 0.08) * (1.0 - smoothstep(0.85, 1.0, le)) * eyeA;
+        col += vec3(1.0, 0.85, 0.65) * (1.0 - smoothstep(0.0, 0.45, le)) * eyeA;
+        col += vec3(1.0, 0.10, 0.05) * exp(-max(le - 1.0, 0.0) * 2.5) * 0.35 * eyeA * (0.7 + 0.3 * uBeat);
+      }
+
+      /* teeth show up when it is nearly on you */
+      float mouthA  = smoothstep(0.55, 0.80, th);
+      float mouthY  = eyeY - 0.075;
+      float zig     = abs(fract((p.x - cxD) * 13.0) - 0.5) * 2.0;
+      float inMouth = step(abs(p.x - cxD), 0.15) * step(mouthY, p.y) * step(p.y, mouthY + 0.034 * (1.0 - zig));
+      col = mix(col, vec3(0.93, 0.88, 0.80), inMouth * mouthA * body);
     }
   }
 
@@ -543,12 +662,29 @@ void main() {
   col = applyShadow(col, p, shadowPos, SKATER_S * 1.1 * shadowScale);
 
   vec2 skp = p - KART_POS - vec2(uSkater.x * LANE_X, 0.0);
-  col = drawSkater(col, skp, SKATER_S, aa);
+  if (!(uBlink > 0.5 && fract(iTime * 9.0) < 0.5)) {      /* blinks while invulnerable after a stumble */
+    col = drawSkater(col, skp, SKATER_S, aa);
+  }
+
+  /* coin pickup burst: a gold ring expanding around the skater */
+  if (uPop > 0.001) {
+    float rr  = length(skp - vec2(0.0, 0.03 + uSkater.y * 0.70));
+    float rad = 0.05 + (1.0 - uPop) * 0.14;
+    col += vec3(1.0, 0.80, 0.25) * exp(-abs(rr - rad) * 70.0) * uPop * 0.8;
+  }
 
   /* Vignette + scanlines */
   vec2 vuv = gl_FragCoord.xy / iResolution.xy;
   float vig = 1.0 - smoothstep(0.55, 1.05, length(vuv - 0.5) * 1.55);
   col *= mix(0.55, 1.0, vig);
+
+  /* dread: blood-dark edges that throb with the heartbeat; the world drains of colour the deeper you run */
+  float dr    = clamp(uThreat, 0.0, 1.0);
+  float edgeD = smoothstep(0.20, 0.95, length(vuv - 0.5) * 1.6);
+  col = mix(col, col * 0.30 + vec3(0.30, 0.0, 0.04), edgeD * dr * (0.50 + 0.50 * uBeat));
+  col *= 1.0 - 0.26 * uDark;
+  col  = mix(col, vec3(dot(col, vec3(0.30, 0.59, 0.11))), 0.30 * uDark);
+  col  = mix(col, vec3(0.90, 0.02, 0.06), uHurt * 0.28);
   float scan = 0.97 + 0.03 * sin(gl_FragCoord.y * 1.6);
   col *= scan;
 
@@ -587,9 +723,10 @@ const uShk    = U('uShake');
 const uSktU   = U('uSkater');
 const uObsC   = U('uObstacleCount');
 const uObsU   = U('uObstacles');
-const uRailC  = U('uRailCount');
-const uRailU  = U('uRails');
-const uGrindU = U('uGrind');
+const uCoinC  = U('uCoinCount');
+const uCoinU  = U('uCoins');
+const uPopU   = U('uPop');
+const uThreatU = U('uThreat'), uHurtU = U('uHurt'), uBlinkU = U('uBlink'), uBeatU = U('uBeat'), uDarkU = U('uDark');
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -620,32 +757,119 @@ const STATE_PLAYING  = 'playing';
 const STATE_GAMEOVER = 'gameover';
 let state = STATE_MENU;
 
-let currentLane = 0;       // -1, 0, 1 (lerped)
-let jumpY = 0;             // 0..~0.27
+let currentLane = 0;       // -1..1 (glides toward targetLane)
+let targetLane  = 0;
+let jumpY = 0;
 let jumpVel = 0;
 let isSliding = false;
-let isGrinding = false;
-let grindTime = 0;
+let coinCount = 0;
+let coinFlash = 0;
 let score = 0;
 let distance = 0;
 let speed = 0;
 let obstacles = [];
-let rails = [];
-let obsTimer = 0;
-let railTimer = 0;
+let coins = [];
+let obsTimer = 0;          // distance travelled since the last obstacle wave (world units)
+let coinTimer = 0;         // distance travelled since the last coin line
 let gameoverTime = 0;
+
+/* ---- difficulty + dread ---- */
+const LEVEL_LEN  = 250;    // metres per level
+const HIT_THREAT = 0.42;   // how far a stumble lets it lunge
+let level = 1, nextLevelAt = LEVEL_LEN;
+let threat = 0;            // 0 = far behind you ... 1 = it has you
+let threatVis = 0;         // smoothed copy that drives the visuals and sound
+let invuln = 0, hurt = 0, shakeT = 0;
+let beatPhase = 0, beatEnv = 0;
+let best = 0;
+try { best = Number(localStorage.getItem('vwSkaterBest')) || 0; } catch (e) {}
 const keys = new Set();
 
-let targetLane = 0;
+/* 0 at the start, ~0.34 at 250 m, ~0.63 at 600 m, ~0.86 at 1200 m. Everything gets harder along this one curve. */
+const diffAt      = d => 1 - Math.exp(-d / 600);
+const threatFloor = diff => 0.05 + 0.12 * diff;     // it is never fully gone, and it hangs closer the further you go
+const LEVEL_MSG = ['', 'RUN', 'IT STIRS', "IT'S WATCHING", "IT'S GAINING", "DON'T LOOK BACK", 'NO ESCAPE'];
+
+const warnEl = document.getElementById('warn');
+function showBanner(title, msg) {
+  const el = document.getElementById('banner');
+  el.querySelector('.b-lv').textContent  = title;
+  el.querySelector('.b-msg').textContent = msg;
+  el.classList.remove('show'); void el.offsetWidth; el.classList.add('show');
+}
+
+/* ------------------------------------------------------------------ */
+/* Audio: everything is synthesised, nothing to download. M = mute.    */
+/* ------------------------------------------------------------------ */
+let audio = null, muted = false;
+function initAudio() {
+  try {
+    if (!audio) {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const master = ctx.createGain();
+      master.gain.value = muted ? 0 : 0.9;
+      master.connect(ctx.destination);
+      const drone = ctx.createGain(); drone.gain.value = 0;
+      const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 140;
+      const o1 = ctx.createOscillator(), o2 = ctx.createOscillator();
+      o1.type = 'sawtooth'; o2.type = 'sawtooth';
+      o1.frequency.value = 43; o2.frequency.value = 43.8;          // two slightly detuned saws = a slow, uneasy beat
+      o1.connect(lp); o2.connect(lp); lp.connect(drone); drone.connect(master);
+      o1.start(); o2.start();
+      audio = { ctx, master, drone, lp };
+    }
+    if (audio.ctx.state === 'suspended') audio.ctx.resume();
+  } catch (e) { audio = null; }
+}
+function tone(freq, dur, vol, type, slideTo) {
+  if (!audio) return;
+  const { ctx, master } = audio, t = ctx.currentTime;
+  const o = ctx.createOscillator(), g = ctx.createGain();
+  o.type = type || 'sine';
+  o.frequency.setValueAtTime(freq, t);
+  if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(vol, t + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(master); o.start(t); o.stop(t + dur + 0.02);
+}
+function noise(dur, vol, cutoff) {
+  if (!audio) return;
+  const { ctx, master } = audio, t = ctx.currentTime;
+  const len = Math.max(1, Math.floor(ctx.sampleRate * dur));
+  const buf = ctx.createBuffer(1, len, ctx.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+  const src = ctx.createBufferSource(), f = ctx.createBiquadFilter(), g = ctx.createGain();
+  src.buffer = buf; f.type = 'lowpass'; f.frequency.value = cutoff; g.gain.value = vol;
+  src.connect(f); f.connect(g); g.connect(master); src.start(t);
+}
+const sfx = {
+  coin()   { tone(988, 0.07, 0.10, 'square'); setTimeout(() => tone(1319, 0.12, 0.10, 'square'), 60); },
+  hit()    { noise(0.35, 0.55, 500); tone(90, 0.30, 0.55, 'sine', 40); },
+  level()  { [523, 659, 784].forEach((f, i) => setTimeout(() => tone(f, 0.18, 0.10, 'triangle'), i * 90)); },
+  caught() { noise(0.9, 0.7, 700); tone(120, 1.0, 0.6, 'sawtooth', 30); },
+  thump(v) { tone(68, 0.16, v, 'sine', 36); },
+};
+function audioTick() {                     // the drone swells and brightens with the dread
+  if (!audio) return;
+  const t = audio.ctx.currentTime;
+  audio.drone.gain.setTargetAtTime(state === STATE_PLAYING ? 0.02 + 0.16 * threatVis : 0, t, 0.25);
+  audio.lp.frequency.setTargetAtTime(120 + 380 * threatVis, t, 0.25);
+}
+
+/* ------------------------------------------------------------------ */
+/* Input                                                               */
+/* ------------------------------------------------------------------ */
 addEventListener('keydown', e => {
   keys.add(e.code);
+  if (e.code === 'KeyM') { muted = !muted; if (audio) audio.master.gain.value = muted ? 0 : 0.9; }
   /* One press = one lane hop, and you stay in the lane you chose. */
   if (!e.repeat && state === STATE_PLAYING) {
     if (e.code === 'KeyA' || e.code === 'ArrowLeft')  targetLane = clamp(targetLane - 1, -1, 1);
     if (e.code === 'KeyD' || e.code === 'ArrowRight') targetLane = clamp(targetLane + 1, -1, 1);
   }
   if ((e.code === 'KeyR' || e.code === 'Space' || e.code === 'Enter') && state !== STATE_PLAYING) {
-    if (state === STATE_GAMEOVER && gameoverTime < 0.5) return;   /* don't skip the crash by accident */
+    if (state === STATE_GAMEOVER && gameoverTime < 0.8) return;   /* don't skip the crash by accident */
     restartGame();
   }
 });
@@ -671,9 +895,11 @@ function drawHUD() {
   hctx.clearRect(0, 0, hud.width, hud.height);
   if (state === STATE_MENU) return;
 
+  const danger = threatVis > 0.7;
+  const flash  = danger && Math.floor(performance.now() / 180) % 2 === 0;
   hctx.fillStyle = 'rgba(6, 8, 20, 0.60)';
   hctx.fillRect(0, 0, hud.width - 2, hud.height - 2);
-  hctx.strokeStyle = 'rgba(110, 220, 255, 0.70)';
+  hctx.strokeStyle = flash ? 'rgba(255, 70, 80, 0.95)' : 'rgba(110, 220, 255, 0.70)';
   hctx.lineWidth = 2;
   hctx.strokeRect(1, 1, hud.width - 4, hud.height - 4);
 
@@ -683,71 +909,141 @@ function drawHUD() {
 
   hctx.font = 'bold 18px ui-monospace, monospace';
   hctx.fillStyle = '#7ce0ff';
-  hctx.fillText('DIST ' + Math.floor(distance) + 'm', 12, 64);
+  hctx.fillText('DIST ' + Math.floor(distance) + 'm', 12, 60);
+  hctx.fillStyle = '#ff9db0';
+  hctx.fillText('LV ' + level, 178, 60);
 
-  if (isGrinding) {
-    hctx.font = 'bold 14px ui-monospace, monospace';
-    hctx.fillStyle = '#3cffcf';
-    hctx.fillText('GRIND! +100', 132, 34);
-  }
+  /* coin counter: gold coin icon that pops on every pickup, then the count */
+  const bump = 1 + 0.30 * coinFlash;
+  hctx.save();
+  hctx.translate(27, 88);
+  hctx.scale(bump, bump);
+  hctx.beginPath(); hctx.arc(0, 0, 11, 0, Math.PI * 2);
+  hctx.fillStyle = '#ffd23f'; hctx.fill();
+  hctx.lineWidth = 3; hctx.strokeStyle = '#c98a00'; hctx.stroke();
+  hctx.beginPath(); hctx.arc(0, 0, 6.5, 0, Math.PI * 2);
+  hctx.lineWidth = 1.5; hctx.strokeStyle = '#fff2a8'; hctx.stroke();
+  hctx.restore();
+  hctx.font = 'bold 24px ui-monospace, monospace';
+  hctx.fillStyle = coinFlash > 0 ? '#fff6b0' : '#ffd166';
+  hctx.fillText('x ' + coinCount, 48, 97);
+  hctx.font = 'bold 13px ui-monospace, monospace';
+  hctx.fillStyle = '#8fb8d8';
+  hctx.fillText('BEST ' + String(best).padStart(6, '0'), 138, 94);
+
+  /* dread meter: fills green -> amber -> red as it closes in */
+  const bx = 70, by = 112, bw = 176, bh = 13;
+  hctx.font = 'bold 13px ui-monospace, monospace';
+  hctx.fillStyle = flash ? '#ff3344' : '#ff8a8a';
+  hctx.fillText('DREAD', 12, 124);
+  hctx.fillStyle = 'rgba(255, 255, 255, 0.12)';
+  hctx.fillRect(bx, by, bw, bh);
+  const g = hctx.createLinearGradient(bx, 0, bx + bw, 0);
+  g.addColorStop(0, '#3cffb0'); g.addColorStop(0.5, '#ffd166'); g.addColorStop(1, '#ff2a3a');
+  hctx.fillStyle = g;
+  hctx.fillRect(bx, by, bw * Math.min(threatVis, 1), bh);
+  hctx.strokeStyle = 'rgba(255, 255, 255, 0.45)'; hctx.lineWidth = 1;
+  hctx.strokeRect(bx + 0.5, by + 0.5, bw - 1, bh - 1);
 }
 
 /* ------------------------------------------------------------------ */
 /* Spawning                                                            */
 /* ------------------------------------------------------------------ */
-function spawnObstacle() {
+/* True when nothing is parked in this lane near the spawn point. */
+function laneFree(lane, minDist) {
+  return !obstacles.some(o => o.lane === lane && o.dist > minDist) &&
+         !coins.some(c => c.h === 0 && c.lane === lane && c.dist > minDist);
+}
+
+function pickFreeLane() {
   let lane = 0;
   for (let attempt = 0; attempt < 6; attempt++) {
     lane = Math.floor(Math.random() * 3) - 1;
-    let conflict = false;
-    for (const ob of obstacles) {
-      if (ob.lane === lane && ob.dist > 18) { conflict = true; break; }
-    }
-    for (const r of rails) { if (r.lane === lane && r.dist > 21) conflict = true; }
-    if (!conflict) break;
+    if (laneFree(lane, 18)) break;
   }
-  const type = Math.random() < 0.5 ? 0 : 1;
-  obstacles.push({ lane, dist: 25, type });
+  return lane;
 }
 
-function spawnRail() {
+/* One "wave" of obstacles. Early on it is a single barrier; the harder the run gets the more it mixes in. */
+function spawnWave(diff) {
+  const gantries = distance > 110;                                    /* the slide obstacle is introduced at ~110 m */
+  const kind = () => (gantries && Math.random() < 0.5) ? 1 : 0;       /* 0 = barrier (jump), 1 = gantry (slide) */
+  const r = Math.random();
+  const busy = [-1, 0, 1].filter(l => !laneFree(l, 18));
+
+  if (diff > 0.28 && r < 0.18 + 0.30 * diff && busy.length <= 1) {
+    /* two lanes blocked, one gap; a coin trail lures you toward the safe lane */
+    const open = busy.length ? busy[0] : Math.floor(Math.random() * 3) - 1;
+    for (const lane of [-1, 0, 1]) {
+      if (lane !== open) obstacles.push({ lane, dist: 25, type: kind() });
+    }
+    for (let k = 0; k < 3; k++) coins.push({ lane: open, dist: 25 + k * 1.4, h: 0, phase: k * 0.13 });
+  } else if (diff > 0.5 && r > 0.80) {
+    /* combo: a gantry with a barrier right behind it (slide, then jump) */
+    const lane = pickFreeLane();
+    obstacles.push({ lane, dist: 25,   type: 1 });
+    obstacles.push({ lane, dist: 29.2, type: 0 });
+  } else {
+    const lane = pickFreeLane();
+    const type = kind();
+    obstacles.push({ lane, dist: 25, type });
+    /* an arc of coins hanging over some barriers rewards the jump */
+    if (type === 0 && Math.random() < 0.6) {
+      for (let k = -1; k <= 1; k++) coins.push({ lane, dist: 25 + k * 1.3, h: 1, phase: Math.random() });
+    }
+  }
+}
+
+function spawnCoinLine() {
   let lane = Math.floor(Math.random() * 3) - 1;
   for (let attempt = 0; attempt < 6; attempt++) {
-    if (!obstacles.some(ob => ob.lane === lane && ob.dist > 21)) break;
+    if (laneFree(lane, 16)) break;
     lane = Math.floor(Math.random() * 3) - 1;
   }
-  rails.push({ lane, dist: 25, grind: false });
+  for (let k = 0; k < 5; k++) coins.push({ lane, dist: 26 + k * 1.5, h: 0, phase: k * 0.13 });
 }
 
 /* ------------------------------------------------------------------ */
 /* Game logic                                                          */
 /* ------------------------------------------------------------------ */
 function restartGame() {
+  initAudio();
   seed = Math.floor(Math.random() * 1000) + 1;
-  currentLane = 0;
-  targetLane = 0;
-  jumpY = 0;
-  jumpVel = 0;
-  isSliding = false;
-  isGrinding = false;
-  grindTime = 0;
-  score = 0;
-  distance = 0;
-  speed = 0;
-  obstacles = [];
-  rails = [];
-  obsTimer = 0;
-  railTimer = 0;
-  gameoverTime = 0;
+  currentLane = 0; targetLane = 0;
+  jumpY = 0; jumpVel = 0; isSliding = false;
+  coinCount = 0; coinFlash = 0;
+  score = 0; distance = 0; speed = 0;
+  obstacles = []; coins = [];
+  obsTimer = 0; coinTimer = 0; gameoverTime = 0;
+  level = 1; nextLevelAt = LEVEL_LEN;
+  threat = threatFloor(0); threatVis = 0;
+  invuln = 0; hurt = 0; shakeT = 0; beatPhase = 0; beatEnv = 0;
   setState(STATE_PLAYING);
+  showBanner('LEVEL 1', LEVEL_MSG[1]);
 }
 
 function triggerGameOver() {
   state = STATE_GAMEOVER;
   gameoverTime = 0;
+  sfx.caught();
+  const sc = Math.floor(score);
+  const isBest = sc > best;
+  if (isBest) { best = sc; try { localStorage.setItem('vwSkaterBest', String(best)); } catch (e) {} }
+  document.getElementById('final-dist').textContent =
+    'IT CAUGHT YOU AT ' + Math.floor(distance) + 'm  ·  LEVEL ' + level;
   document.getElementById('final-score').textContent =
-    'FINAL SCORE  ' + String(Math.floor(score)).padStart(6, '0');
+    'SCORE ' + String(sc).padStart(6, '0') + '   ·   COINS ' + coinCount +
+    (isBest ? '   ·   NEW BEST!' : '   ·   BEST ' + String(best).padStart(6, '0'));
   setState(STATE_GAMEOVER);
+}
+
+/* Hitting something is no longer instant death: you stumble, lose speed, and IT lunges closer. */
+function stumble() {
+  threat = Math.min(1, threat + HIT_THREAT);
+  speed *= 0.45;
+  invuln = 1.3; hurt = 1; shakeT = 0.4;
+  sfx.hit();
+  if (threat >= 1) triggerGameOver();
 }
 
 function setState(newState) {
@@ -759,6 +1055,8 @@ function setState(newState) {
 }
 
 function updateGame(dt) {
+  const diff = diffAt(distance);
+
   /* Glide to the chosen lane (frame-rate independent). */
   currentLane += (targetLane - currentLane) * (1 - Math.exp(-dt * 14));
 
@@ -775,67 +1073,98 @@ function updateGame(dt) {
   /* Slide (ground only) */
   isSliding = (keys.has('KeyS') || keys.has('ArrowDown')) && jumpY === 0;
 
-  /* Ease up to full speed, then keep getting faster the further you get (up to 2x at 600m). */
+  /* Ease up to full speed; the run keeps getting faster along the difficulty curve (up to ~2.1x). */
   speed += (MAX_SPEED - speed) * Math.min(dt * 0.8, 1);
-  const ramp = Math.min(distance / 600, 1.0);
-  const pace = speed * (1.0 + ramp);
+  const pace = speed * (1.0 + 1.1 * diff);
 
   /* Distance + score */
   const step = pace * dt * 8;
   distance += step;
   score += step * 10;
 
-  /* Spawn timers */
-  /* timers run faster as pace rises, so obstacle spacing stays the same in world units */
-  obsTimer += dt * (1.0 + ramp);
-  railTimer += dt * (1.0 + ramp);
-  if (obsTimer > 0.85) { obsTimer = 0; spawnObstacle(); }
-  if (railTimer > 3.0) { railTimer = 0; spawnRail(); }
+  /* A new level every 250 m: bonus score, a breath of relief, and the banner gets more ominous. */
+  if (distance >= nextLevelAt) {
+    level++; nextLevelAt += LEVEL_LEN;
+    score += 250 * (level - 1);
+    threat = Math.max(threatFloor(diff), threat - 0.15);
+    showBanner('LEVEL ' + level, LEVEL_MSG[Math.min(level, LEVEL_MSG.length - 1)]);
+    sfx.level();
+  }
 
-  /* Move obstacles + rails toward player */
+  /* Spawning is by DISTANCE travelled, so spacing is constant in world units at any speed.
+     Gaps shrink from 8.6 to 5.6 units as the curve climbs; the first obstacle comes at 35 m. */
+  obsTimer  += step;
+  coinTimer += step;
+  const spacing = Math.max(5.6, 8.6 - 3.2 * diff);
+  if (distance > 35 && obsTimer  > spacing) { obsTimer  = 0; spawnWave(diff); }
+  if (distance > 12 && coinTimer > 20)      { coinTimer = 0; spawnCoinLine(); }
+
+  /* Move everything toward the player */
   for (let i = obstacles.length - 1; i >= 0; i--) {
     obstacles[i].dist -= step;
     if (obstacles[i].dist < -1.0) obstacles.splice(i, 1);
   }
-  for (let i = rails.length - 1; i >= 0; i--) {
-    rails[i].dist -= step;
-    if (rails[i].dist < -1.0) rails.splice(i, 1);
+  for (let i = coins.length - 1; i >= 0; i--) {
+    coins[i].dist -= step;
+    if (coins[i].dist < -1.0) coins.splice(i, 1);
   }
 
-  /* Collision */
-  for (const ob of obstacles) {
-    if (Math.abs(ob.dist) < 0.5 && Math.abs(ob.lane - currentLane) < 0.4) {
-      let avoided = false;
-      if (ob.type === 0 && jumpY > 0.10) avoided = true;
-      if (ob.type === 1 && isSliding)    avoided = true;
-      if (!avoided) { triggerGameOver(); return; }
+  /* Collision: a barrier is cleared by jumping, a gantry by sliding under it. Otherwise: stumble. */
+  if (invuln > 0) invuln -= dt;
+  for (let i = obstacles.length - 1; i >= 0; i--) {
+    const ob = obstacles[i];
+    if (Math.abs(ob.dist) < 0.5 && Math.abs(ob.lane - currentLane) < 0.45) {
+      const avoided = ob.type === 0 ? jumpY > 0.15 : isSliding;
+      if (!avoided && invuln <= 0) {
+        obstacles.splice(i, 1);                 /* you smash through it */
+        stumble();
+        if (state === STATE_GAMEOVER) return;
+      }
     }
   }
 
-  /* Rails */
-  for (const r of rails) {
-    if (!r.grind && jumpY < 0.10 && Math.abs(r.dist) < 0.5 && Math.abs(r.lane - currentLane) < 0.4) {
-      r.grind = true;
-      score += 100;
-      isGrinding = true;
-      grindTime = 0.6;
+  /* Coins: ground coins need you low, raised coins need you in the air. Each one pushes IT back a little. */
+  for (let i = coins.length - 1; i >= 0; i--) {
+    const c = coins[i];
+    if (Math.abs(c.dist) < 0.6 && Math.abs(c.lane - currentLane) < 0.55) {
+      const reachable = c.h ? jumpY > 0.09 : jumpY < 0.16;
+      if (reachable) {
+        coins.splice(i, 1); coinCount++; score += 25; coinFlash = 1.0;
+        threat -= 0.03;
+        sfx.coin();
+      }
     }
   }
-  if (isGrinding) {
-    grindTime -= dt;
-    if (grindTime <= 0) isGrinding = false;
-  }
 
-  if (state === STATE_GAMEOVER) gameoverTime += dt;
+  /* The Dark: backs off while you run clean (more slowly the deeper you are), gains when you slow down. */
+  threat -= (0.045 - 0.020 * diff) * dt;
+  if (speed < MAX_SPEED * 0.6) threat += 0.07 * dt;
+  threat = clamp(threat, threatFloor(diff), 1.0);
+  if (threat >= 1.0) { triggerGameOver(); return; }
+
+  coinFlash = Math.max(0, coinFlash - dt * 3.0);
+  hurt      = Math.max(0, hurt - dt * 2.2);
+  shakeT    = Math.max(0, shakeT - dt);
+
+  /* heartbeat: 54 bpm when it is far, ~156 bpm when it is on top of you */
+  const bps    = 0.9 + 1.7 * threatVis;
+  const prevPh = beatPhase % 1;
+  beatPhase   += dt * bps;
+  const ph     = beatPhase % 1;
+  if (prevPh > ph) { if (threatVis > 0.12) sfx.thump(0.10 + 0.50 * threatVis); }
+  else if (prevPh < 0.30 && ph >= 0.30 && threatVis > 0.12) sfx.thump(0.07 + 0.35 * threatVis);
+  beatEnv = Math.max(Math.exp(-Math.pow((ph - 0.03) / 0.06, 2)),
+                     0.7 * Math.exp(-Math.pow((ph - 0.30) / 0.07, 2)));
 }
 
 /* ------------------------------------------------------------------ */
 /* Uniform buffers                                                     */
 /* ------------------------------------------------------------------ */
 const obsBuf  = new Float32Array(16 * 4);
-const railBuf = new Float32Array(8 * 4);
+const coinBuf = new Float32Array(32 * 4);
 
 function packBuffers() {
+  obstacles.sort((a, b) => a.dist - b.dist);       /* nearest first, like the shader expects */
   for (let i = 0; i < 16; i++) {
     if (i < obstacles.length) {
       const ob = obstacles[i];
@@ -847,15 +1176,16 @@ function packBuffers() {
       obsBuf[i * 4 + 3] = 0.0;
     }
   }
-  for (let i = 0; i < 8; i++) {
-    if (i < rails.length) {
-      const r = rails[i];
-      railBuf[i * 4 + 0] = r.lane;
-      railBuf[i * 4 + 1] = r.dist;
-      railBuf[i * 4 + 2] = 1.0;
-      railBuf[i * 4 + 3] = r.grind ? 1.0 : 0.0;
+  coins.sort((a, b) => a.dist - b.dist);
+  for (let i = 0; i < 32; i++) {
+    if (i < coins.length) {
+      const c = coins[i];
+      coinBuf[i * 4 + 0] = c.lane;
+      coinBuf[i * 4 + 1] = c.dist;
+      coinBuf[i * 4 + 2] = c.h;
+      coinBuf[i * 4 + 3] = c.phase;
     } else {
-      railBuf[i * 4 + 2] = 0.0;
+      coinBuf[i * 4 + 1] = 99.0;
     }
   }
 }
@@ -882,30 +1212,44 @@ function frame(now) {
     distance += dt * 2.0;     /* idle scroll behind the menu */
   }
 
+  /* The Dark lunges quickly toward its target (so a hit feels like a hit) and slinks away slowly. */
+  const tTarget = state === STATE_PLAYING ? threat : state === STATE_GAMEOVER ? 1.0 : 0.0;
+  threatVis += (tTarget - threatVis) * (1 - Math.exp(-dt * (tTarget > threatVis ? 7 : 2.5)));
+  audioTick();
+  warnEl.classList.toggle('on', state === STATE_PLAYING && threatVis > 0.68);
+
   drawHUD();
 
-  /* Shake */
+  /* Shake: big on a stumble, a nervous tremble when it is right behind you, a jolt on game over */
+  let shx = 0, shy = 0;
   if (state === STATE_GAMEOVER && gameoverTime < 0.25) {
-    gl.uniform2f(uShk,
-      Math.sin(tSec * 90.0) * 0.015 * (1.0 - gameoverTime / 0.25),
-      Math.cos(tSec * 120.0) * 0.015 * (1.0 - gameoverTime / 0.25));
-  } else {
-    gl.uniform2f(uShk, 0.0, 0.0);
+    const k = 0.015 * (1.0 - gameoverTime / 0.25);
+    shx = Math.sin(tSec * 90.0) * k;  shy = Math.cos(tSec * 120.0) * k;
+  } else if (state === STATE_PLAYING) {
+    const amp = 0.014 * Math.min(shakeT / 0.4, 1.0) + 0.005 * Math.max(0, threatVis - 0.75) / 0.25;
+    shx = Math.sin(tSec * 70.0) * amp;  shy = Math.cos(tSec * 93.0) * amp;
   }
+  gl.uniform2f(uShk, shx, shy);
 
   packBuffers();
 
+  const playing = state === STATE_PLAYING;
   gl.uniform3f(uRes, canvas.width, canvas.height, 1.0);
   gl.uniform1f(uTime, tSec);
   gl.uniform1f(uSeedU, seed);
   gl.uniform1f(uSpd, speed);
   gl.uniform1f(uDist, distance);
   gl.uniform3f(uSktU, currentLane, jumpY, isSliding ? 1.0 : 0.0);
-  gl.uniform1f(uGrindU, isGrinding ? 1.0 : 0.0);
+  gl.uniform1f(uPopU, coinFlash);
+  gl.uniform1f(uThreatU, threatVis);
+  gl.uniform1f(uHurtU, hurt);
+  gl.uniform1f(uBlinkU, playing && invuln > 0 ? 1.0 : 0.0);
+  gl.uniform1f(uBeatU, playing ? beatEnv : 0.0);
+  gl.uniform1f(uDarkU, state === STATE_MENU ? 0.0 : diffAt(distance));
   gl.uniform1i(uObsC, Math.min(obstacles.length, 16));
   gl.uniform4fv(uObsU, obsBuf);
-  gl.uniform1i(uRailC, Math.min(rails.length, 8));
-  gl.uniform4fv(uRailU, railBuf);
+  gl.uniform1i(uCoinC, Math.min(coins.length, 32));
+  gl.uniform4fv(uCoinU, coinBuf);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 
   requestAnimationFrame(frame);

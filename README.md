@@ -16,9 +16,17 @@ I have added the following characters:
 
 1. A Skinny Skater (Inspired by a flash style android game called skater boy)
 
+Instructions for playing:
+
+1. `A/D` to switch lanes.
+2. `W` to jump over obstacles.
+3. `S` to slide under obstacles.
+4. There are two types of obstacles: A. The Jumpable Barricade(Orange) and B. Slideable obstacles(Purple).
+5. You can't slide through orange ones and you can't jump over the purple ones. 
+
 I believe that the bugs found might be the result of the usage of shaders which causes bugs while trying to replicate 3D. 
 
 Sorry for any and all bugs related to my code and shader engine.
 
 So this is the end of my README.md. 
-I would have been open enough to accept community suggestions and work upon imporving my game with bugs unrelated to shader script.
+I would be open enough to accept community suggestions and work upon imporving my game with bugs unrelated to shader script.
